@@ -1,0 +1,405 @@
+[문서 제목] 보고 / 대화 패턴 정리 (Reporting & Conversation Patterns)
+
+[0. 목적]
+
+* 이 문서는 **사용자에게 결과를 보고하거나 대화로 마무리해야 하는 요청**을 어떻게 PLAN JSON 패턴으로 표현할지 정리한다.
+* 특히 다음과 같은 표현이 포함된 요청에서,
+
+  * "보고 와", "보고와", "보고 와서 알려줘"
+  * "내게 다시 알려줘", "나한테 와서 말해줘", "결과 알려줘", "나한테 알려줘", "보고해줘"
+    등과 같은 **보고/대화 요청 뉘앙스**를 일관된 PLAN으로 변환하는 것이 목적이다.
+
+---
+
+[1. 기본 개념]
+
+1.1. 보고(Reporting)의 의미
+
+* 사용자가 "보고 와", "다시 알려줘" 등으로 말하는 경우,
+
+  * 이는 **미션 실패(fail)**가 아니라,
+  * 로봇이 **사용자에게 돌아와서 결과를 설명하거나 대화로 공유하라**는 의미이다.
+* 따라서 이런 요청에서는 `fail_and_report`가 아니라
+  `navigate` + `talk_to_person(target="user")` 패턴을 사용해야 한다.
+
+1.2. 보고 대상
+
+* `talk_to_person` 액션의 `target` 값은 크게 세 가지로 구분한다.
+
+  * `"professor"`: 교수님과의 대화
+  * `"user"`: 미션을 요청한 사람(또는 그 사람과 연결된 UI)
+  * 기타 인물 ID가 정의될 수 있으나, 본 문서는 `"professor"`, `"user"`에 집중한다.
+
+1.3. basecamp의 의미
+
+* `"basecamp"`는 기본적으로 **사용자가 있는 위치** 혹은
+  **로봇이 사용자와 상호작용하는 허브 위치**로 사용한다.
+* 사용자가 "돌아와서 말해줘", "보고 와"라고 말하면,
+
+  * 핵심 작업을 수행한 뒤 `"basecamp"`로 navigate 한 후
+  * `"user"`에게 `talk_to_person`으로 보고하는 패턴을 사용한다.
+
+---
+
+[2. 보고 관련 키워드 목록]
+
+2.1. 보고 요청 키워드 (REPORT_KEYWORDS)
+
+* 사용자의 요청에 아래 표현이 하나라도 포함되면
+  **“사용자에게 결과를 다시 알려줘야 하는 미션”**으로 분류한다.
+
+* 예시 키워드:
+
+  * "보고 와"
+  * "보고와"
+  * "보고 와줘"
+  * "보고와줘"
+  * "보고 와서 알려줘"
+  * "보고와서 알려줘"
+  * "내게 다시 알려줘"
+  * "다시 알려줘"
+  * "나한테 와서 말해줘"
+  * "나한테 와서 알려줘"
+  * "나한테 알려줘"
+  * "결과를 알려줘"
+  * "결과 알려줘"
+  * "나한테 보고해줘"
+  * "보고해줘"
+
+* PLAN LLM / Planner는 위 표현 중 하나라도 발견되면,
+
+  * 핵심 액션(이동, 관찰, 전달, 교수님 대화 등)을 모두 수행한 뒤,
+  * **반드시** `navigate`(target="basecamp") + `talk_to_person`(target="user") 패턴을 포함해야 한다.
+
+---
+
+[3. 미션 유형별 보고 패턴]
+
+3.1. 교수님 관련 미션 + 보고
+
+* 예시 요청:
+
+  * "교수님께 가서 프로젝트 언제 할지 여쭤보고 내게 다시 알려줘."
+  * "교수님 방에 가서 다음 회의 일정 물어보고, 나한테 와서 말해줘."
+
+* 기본 패턴:
+
+  1. `navigate` → target `"professor_office"`
+  2. `talk_to_person` → target `"professor"`, topic에 문의 내용
+  3. (선택) `summarize_mission` – 교수님과의 전체 상호작용 요약
+  4. `navigate` → target `"basecamp"`
+  5. `talk_to_person` → target `"user"`, topic에 결과 보고 내용
+  6. (선택) `summarize_mission` – 전체 미션 요약
+
+* 추천 PLAN JSON 예시:
+
+  ```json
+  {
+    "plan": [
+      {
+        "action": "navigate",
+        "params": { "target": "professor_office" }
+      },
+      {
+        "action": "talk_to_person",
+        "params": {
+          "target": "professor",
+          "topic": "다음 회의 일정 문의"
+        }
+      },
+      {
+        "action": "navigate",
+        "params": { "target": "basecamp" }
+      },
+      {
+        "action": "talk_to_person",
+        "params": {
+          "target": "user",
+          "topic": "교수님의 다음 회의 일정 결과 보고"
+        }
+      },
+      {
+        "action": "summarize_mission",
+        "params": {}
+      }
+    ]
+  }
+  ```
+
+* 규칙:
+
+  * "교수님"/"professor"가 포함된 요청에서만
+    `navigate` target `"professor_office"`, `talk_to_person` target `"professor"`를 사용할 수 있다.
+  * "다시 알려줘", "나한테 와서 말해줘", "보고 와서 알려줘"가 포함되면
+    위 PLAN 뒤에 `"basecamp"` + `"user"` 보고 패턴을 붙인다.
+
+3.2. 복도/환경 관찰 미션 + 보고
+
+* 예시 요청:
+
+  * "복도에 몇 명 있는지 보고 와서 알려줘."
+  * "복도에 불이 켜져 있는지 보고 와."
+  * "복도 쪽 이상 없는지 확인하고, 나한테 알려줘."
+
+* 기본 패턴:
+
+  1. `navigate` → target `"corridor_center"` (또는 해당 위치 ID)
+  2. `observe_scene` → target `"corridor_center"`, query에 관찰 목적
+  3. `navigate` → target `"basecamp"`
+  4. `talk_to_person` → target `"user"`, topic에 관찰 결과 요약
+  5. (선택) `summarize_mission` – 전체 미션 요약
+
+* 추천 PLAN JSON 예시 1: 복도 사람 수 + 보고
+
+  ```json
+  {
+    "plan": [
+      {
+        "action": "navigate",
+        "params": { "target": "corridor_center" }
+      },
+      {
+        "action": "observe_scene",
+        "params": {
+          "target": "corridor_center",
+          "query": "복도에서 사람 수, 사람 존재 여부, 소란스러운 행동이 있는지 확인"
+        }
+      },
+      {
+        "action": "navigate",
+        "params": { "target": "basecamp" }
+      },
+      {
+        "action": "talk_to_person",
+        "params": {
+          "target": "user",
+          "topic": "복도에서 관찰한 사람 수와 소란 여부에 대한 보고"
+        }
+      },
+      {
+        "action": "summarize_mission",
+        "params": {}
+      }
+    ]
+  }
+  ```
+
+* 추천 PLAN JSON 예시 2: 복도 조명 + 보고
+
+  ```json
+  {
+    "plan": [
+      {
+        "action": "navigate",
+        "params": { "target": "corridor_center" }
+      },
+      {
+        "action": "observe_scene",
+        "params": {
+          "target": "corridor_center",
+          "query": "복도 조명이 켜져 있는지, 꺼진 구간이 있는지 확인"
+        }
+      },
+      {
+        "action": "navigate",
+        "params": { "target": "basecamp" }
+      },
+      {
+        "action": "talk_to_person",
+        "params": {
+          "target": "user",
+          "topic": "복도 조명 상태(켜짐/꺼짐, 이상 구간 유무)에 대한 보고"
+        }
+      },
+      {
+        "action": "summarize_mission",
+        "params": {}
+      }
+    ]
+  }
+  ```
+
+3.3. 순찰 미션 + 보고
+
+* 예시 요청:
+
+  * "복도 순찰하고 돌아와서 나한테 상황 알려줘."
+  * "복도랑 라운지 쪽에 이상한 일 없는지 보고 와줘."
+
+* 기본 패턴:
+
+  1. 여러 위치를 순차적으로 `navigate` + `observe_scene`
+  2. 마지막에 `navigate` → `"basecamp"`
+  3. `talk_to_person` → `"user"` (순찰 결과 보고)
+  4. (선택) `summarize_mission`
+
+* 추천 PLAN JSON 예시:
+
+  ```json
+  {
+    "plan": [
+      {
+        "action": "navigate",
+        "params": { "target": "corridor_center" }
+      },
+      {
+        "action": "observe_scene",
+        "params": {
+          "target": "corridor_center",
+          "query": "복도 중앙의 사람 수, 소란 여부, 이상 상황 확인"
+        }
+      },
+      {
+        "action": "navigate",
+        "params": { "target": "lounge" }
+      },
+      {
+        "action": "observe_scene",
+        "params": {
+          "target": "lounge",
+          "query": "라운지의 사람 수, 혼잡도, 이상 상황 확인"
+        }
+      },
+      {
+        "action": "navigate",
+        "params": { "target": "basecamp" }
+      },
+      {
+        "action": "talk_to_person",
+        "params": {
+          "target": "user",
+          "topic": "복도와 라운지 순찰 결과 보고"
+        }
+      },
+      {
+        "action": "summarize_mission",
+        "params": {}
+      }
+    ]
+  }
+  ```
+
+---
+
+[4. 이동 없는 미션의 보고 패턴]
+
+4.1. 로봇이 이미 basecamp에 있고, 사용자와 대화만 하는 경우
+
+* 예시 요청:
+
+  * "지금까지 한 일을 정리해서 나한테 알려줘."
+  * "오늘 있었던 일 요약해줘."
+
+* 기본 패턴:
+
+  1. `talk_to_person` → target `"user"`, topic에 설명 내용
+  2. (선택) `summarize_mission` – 내부 로그에 대한 요약 (보고용)
+
+* 추천 PLAN JSON 예시:
+
+  ```json
+  {
+    "plan": [
+      {
+        "action": "talk_to_person",
+        "params": {
+          "target": "user",
+          "topic": "오늘 수행한 미션들의 요약을 설명"
+        }
+      },
+      {
+        "action": "summarize_mission",
+        "params": {}
+      }
+    ]
+  }
+  ```
+
+---
+
+[5. 보고 패턴 적용 우선순위]
+
+5.1. 우선순위 규칙
+
+* 1순위: 교수님 관련 키워드
+
+  * "교수님", "professor"가 포함된 경우,
+
+    * 먼저 **교수님 관련 미션 패턴**을 구성한다.
+    * 이후 보고 키워드가 있으면, basecamp + user 보고를 **추가로** 붙인다.
+
+* 2순위: 환경/복도 관찰 키워드
+
+  * "복도", "라운지", "휴게실", "화장실 앞" 등 환경 관련 키워드가 있고,
+  * 교수님 관련 키워드는 없을 때,
+
+    * 환경 관찰 패턴을 구성하고,
+    * 보고 키워드가 있으면 basecamp + user 보고를 붙인다.
+
+* 3순위: 이동 없는 순수 대화/보고
+
+  * 이동/관찰 키워드가 없고,
+    "알려줘", "설명해줘", "정리해줘" 등의 표현만 있을 때,
+
+    * 이동 없이 `talk_to_person(target="user")` (+ summarize_mission)로 처리한다.
+
+5.2. PLAN 내부에서의 위치
+
+* 보고 패턴(`basecamp` + `user`)은 항상 **핵심 작업 이후**에 배치한다.
+
+  * 핵심 작업 예:
+
+    * 교수님과의 대화 (`talk_to_person` target `"professor"`)
+    * 물건 전달 (`deliver_object`)
+    * 환경 관찰 (`observe_scene`)
+  * 핵심 작업이 여러 개일 경우(여러 위치 순찰 등),
+
+    * 모든 핵심 작업이 끝난 뒤 마지막에 보고 패턴을 넣는다.
+
+---
+
+[6. Planner 구현 시 팁]
+
+6.1. LLM 출력 후 후처리(fix_plan)에서의 활용
+
+* Planner가 생성한 PLAN을 검증한 뒤,
+  질문에 보고 키워드가 포함되어 있고,
+  PLAN 안에 `talk_to_person(target="user")`가 없다면:
+
+  1. PLAN의 마지막 `summarize_mission` 위치를 찾는다.
+  2. 없다면 PLAN 끝에 추가한다.
+  3. `summarize_mission` 앞에 다음 두 단계를 삽입한다.
+
+     * `navigate` → target `"basecamp"`
+     * `talk_to_person` → target `"user"`
+
+* 이 로직을 적용하면, LLM이 다소 불완전한 PLAN을 생성하더라도
+  질문의 의도(“보고 와”)에 맞는 최소한의 보고 패턴이 보장된다.
+
+6.2. topic 자동 생성 템플릿
+
+* 환경 관찰 미션:
+
+  * `"topic": "<location_id>에서 관찰한 상황(예: 조명, 사람 수, 소란 여부)에 대한 보고"`
+
+* 교수님 질의 미션:
+
+  * `"topic": "교수님의 '<질문 요약>'에 대한 답변 보고"`
+
+* 구현 시에는 질문 문자열을 간단히 요약하거나,
+  location_id, query를 이용해 템플릿 문자열을 구성하면 된다.
+
+---
+
+[7. 요약]
+
+* 이 문서는 **“보고 / 다시 알려줘 / 보고 와” 계열 표현**이 등장했을 때
+  PLAN JSON에 **반드시 포함되어야 할 보고 패턴**을 정의한다.
+* 핵심 포인트:
+
+  1. 보고 키워드가 있으면 → `navigate(basecamp)` + `talk_to_person(user)`를 **핵심 작업 뒤에** 붙인다.
+  2. 교수님 관련 미션과 환경 관찰 미션 모두에 이 패턴을 적용할 수 있다.
+  3. Planner는 LLM 프롬프트 레벨 + 후처리(fix_plan) 레벨에서 이 문서를 참고하여
+     일관된 보고 PLAN을 생성해야 한다.
+
+---
