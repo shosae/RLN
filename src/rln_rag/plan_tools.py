@@ -4,55 +4,46 @@ from typing import Any, Callable, Dict
 
 from langchain_core.tools import tool
 
+from app.services.executor_service import ExecutorService
 from .rag_graph import build_rag_graph
+
+_executor = ExecutorService()
 
 
 @tool("navigate")
 def navigate_tool(target: str) -> Dict[str, Any]:
     """Simulate navigation by returning a status payload."""
-    return {"status": "success", "message": f"Navigated to {target}", "target": target}
+    return _executor.navigate(target)
 
 
 @tool("summarize_mission")
 def summarize_tool(summary: str | None = None) -> Dict[str, Any]:
     """Return a text summary to the user."""
-    body = summary or "임무 요약이 준비되었습니다."
-    return {"status": "reported", "message": body}
+    return _executor.summarize_mission(summary)
 
 
 @tool("report")
 def report_tool(content: str) -> Dict[str, Any]:
     """Send a textual report back to the requesting user."""
-    return {"status": "reported", "message": content}
+    return _executor.report(content)
 
 
 @tool("wait")
 def wait_tool(seconds: int = 1) -> Dict[str, Any]:
     """Simulate a blocking wait."""
-    return {"status": "waiting", "seconds": seconds}
+    return _executor.wait(seconds)
 
 
 @tool("observe_scene")
 def observe_scene_tool(target: str, query: str | None = None) -> Dict[str, Any]:
     """Simulate observing a physical location."""
-    q = query or "환경 상태를 관찰"
-    return {
-        "status": "success",
-        "message": f"Observed {target}: {q}",
-        "target": target,
-    }
+    return _executor.observe_scene(target, query)
 
 
 @tool("deliver_object")
 def deliver_object_tool(receiver: str | None = None, item: str | None = None) -> Dict[str, Any]:
     """Simulate delivering an item."""
-    item_text = item or "물품"
-    dest = receiver or "recipient"
-    return {
-        "status": "success",
-        "message": f"Delivered {item_text} to {dest}",
-        "receiver": dest,
-    }
+    return _executor.deliver_object(receiver, item)
 
 
 def build_action_dispatch(retriever, llm) -> Dict[str, Callable[[Dict[str, Any]], Dict[str, Any]]]:

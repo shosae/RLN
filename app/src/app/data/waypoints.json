@@ -1,0 +1,19 @@
+{
+  "id": "corridor_center",
+  "display_name": "복도 중앙",
+  "description": "복도 중앙 지점, 소음/사람 수 확인용",
+  "map_id": "engineering_floor_3",
+  "nav_goal_id": "nav_goal_corridor_center",
+  "pose": {
+    "x": 3.0,
+    "y": 0.0,
+    "yaw": 0.0,
+    "frame": "map"
+  },
+  "floor": "3F",
+  "allowed_actions": ["navigate", "observe_scene", "summarize_mission"],
+  "adjacent": ["basecamp", "restroom_front"],
+  "metadata": {
+    "notes": "휴게실로 가는 길목"
+  }
+}
