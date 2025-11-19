@@ -34,6 +34,7 @@ from rln_rag.orchestrator_graph import (
 from rln_rag.plan_validator import PlanValidationResult, ALLOWED_ACTIONS
 from rln_rag.settings import Settings, get_settings
 from rln_rag.vectorstore import load_vectorstore
+from rln_rag.waypoints import load_waypoint_documents
 
 
 class Context(TypedDict, total=False):
@@ -136,8 +137,9 @@ def _load_resources(signature: Tuple[Tuple[str, Any], ...]):
     except Exception as exc:  # noqa: BLE001
         raise ResourceInitError(f"LLM 초기화 실패: {exc}") from exc
 
+    waypoint_docs = load_waypoint_documents(settings)
     retriever = vectorstore.as_retriever(search_kwargs={"k": settings.top_k})
-    return settings, retriever, llm
+    return settings, retriever, llm, waypoint_docs
 
 
 def _get_resources(runtime: Runtime[Context]):
@@ -217,7 +219,7 @@ def classify_intent(state: OrchestratorState, runtime: Runtime[Context]) -> Orch
 async def conversation_agent(state: OrchestratorState, runtime: Runtime[Context]) -> OrchestratorState:
     question = state["question"]
     try:
-        _, retriever, llm = await _aget_resources(runtime)
+        _, retriever, llm, _ = await _aget_resources(runtime)
     except ResourceInitError as exc:
         return _error_state(question, str(exc))
 
@@ -237,11 +239,11 @@ async def conversation_agent(state: OrchestratorState, runtime: Runtime[Context]
 async def planner_agent(state: OrchestratorState, runtime: Runtime[Context]) -> OrchestratorState:
     question = state["question"]
     try:
-        _, retriever, llm = await _aget_resources(runtime)
+        _, _, llm, waypoint_docs = await _aget_resources(runtime)
     except ResourceInitError as exc:
         return _error_state(question, str(exc))
 
-    plan_obj, docs = await asyncio.to_thread(generate_plan, question, retriever, llm)
+    plan_obj, docs = await asyncio.to_thread(generate_plan, question, waypoint_docs, llm)
     validation: PlanValidationResult = validate_plan(plan_obj)
     plan_json = json.dumps(plan_obj, ensure_ascii=False, indent=2)
     return {
@@ -419,7 +421,7 @@ async def execute_talk_to_person(state: OrchestratorState, runtime: Runtime[Cont
 async def execute_summarize_mission(state: OrchestratorState, runtime: Runtime[Context]) -> OrchestratorState:
     logs = list(state.get("execution_log") or [])
     try:
-        _, _, llm = await _aget_resources(runtime)
+        _, _, llm, _ = await _aget_resources(runtime)
         await asyncio.sleep(4)
         log_text = _log_text(logs)
         messages = SUMMARY_PROMPT.format_messages(
