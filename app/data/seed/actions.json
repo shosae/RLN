@@ -1,0 +1,61 @@
+{
+  "actions": [
+    {
+      "name": "navigate",
+      "description": "지정된 위치로 이동한다.",
+      "required_params": ["target"],
+      "nl_params": [],
+      "trigger_phrases": [
+        "가",
+        "가줘",
+        "이동해",
+        "데려다줘",
+        "향해 가줘"
+      ]
+    },
+    {
+      "name": "observe_scene",
+      "description": "지정된 위치에서 주변 상황을 관찰하거나 확인한다.",
+      "required_params": ["question"],
+      "nl_params": ["question"],
+      "trigger_phrases": [
+        "보고 와",
+        "보고와",
+        "확인해",
+        "봐줘",
+        "인지 확인",
+        "살펴봐"
+      ]
+    },
+    {
+      "name": "deliver_object",
+      "description": "지정된 위치에서 물건을 전달하거나 건넨다.",
+      "required_params": ["target"],
+      "nl_params": [],
+      "trigger_phrases": [
+        "전달해줘",
+        "전달해 줘",
+        "갖다줘",
+        "갖다 줘",
+        "전해줘",
+        "전해 줘",
+        "드리고 와",
+        "건네",
+        "두고 와"
+      ]
+    },
+    {
+      "name": "summarize_mission",
+      "description": "이번 임무의 결과를 요약한다. PLAN 마지막에서 한 번만 등장해야 한다.",
+      "required_params": [],
+      "nl_params": [],
+      "trigger_phrases": [
+        "보고해",
+        "결과 알려줘",
+        "상황 알려줘",
+        "요약해줘",
+        "상황 정리해줘"
+      ]
+    }
+  ]
+}

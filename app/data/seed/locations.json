@@ -1,0 +1,20 @@
+{
+  "locations": [
+    {
+      "id": "professor_office",
+      "description": "사용자가 지칭한 교수님 연구실 또는 교수님 방."
+    },
+    {
+      "id": "corridor_center",
+      "description": "복도 중앙 또는 복도 중심 영역."
+    },
+    {
+      "id": "restroom_front",
+      "description": "화장실 입구 앞 또는 화장실 앞 공간."
+    },
+    {
+      "id": "basecamp",
+      "description": "로봇의 기본 대기 장소. summarize_mission 전에 반드시 돌아와야 함."
+    }
+  ]
+}

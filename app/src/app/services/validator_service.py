@@ -29,7 +29,7 @@ class CompositeValidatorService:
         llm: BaseChatModel | None = None,
         extra_context: str | None = None,
     ) -> PlanValidationResult:
-        result = self.rule_service.validate(plan)
+        result = self.rule_service.validate(plan, question)
         if llm is None:
             return result
 

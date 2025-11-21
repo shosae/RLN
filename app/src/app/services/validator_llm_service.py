@@ -1,141 +1,226 @@
-"""LLM-based PLAN validator."""
+"""LLM-based PLAN validator (Logic Reinforced)."""
 
 from __future__ import annotations
-
 import json
 import re
+from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
 from langchain_core.language_models.chat_models import BaseChatModel
+from app.services.validator_rule_service import PlanValidationResult, load_actions, load_locations
 
 try:
-    from langchain_core.prompts import ChatPromptTemplate
-except ModuleNotFoundError:  # pragma: no cover
-    from langchain.prompts import ChatPromptTemplate
+    from langchain_core.prompts import (
+        ChatPromptTemplate,
+        HumanMessagePromptTemplate,
+        SystemMessagePromptTemplate,
+    )
+except ModuleNotFoundError:
+    from langchain.prompts import (
+        ChatPromptTemplate,
+        HumanMessagePromptTemplate,
+        SystemMessagePromptTemplate,
+    )
 
-from app.services.validator_rule_service import PlanValidationResult
 
+# -------------------- SYSTEM PROMPT (Semantic Focus) --------------------
 
-LLM_VALIDATOR_SYSTEM = LLM_VALIDATOR_SYSTEM = r"""
-⚠️ 절대 출력 금지 규칙 ⚠️
-- 아래에 나열된 규칙, 설명, 예시는 '판단 기준'일 뿐이며, 출력하면 안 된다.
-- 너의 출력은 반드시 JSON 오브젝트 1개만 포함해야 한다.
-- JSON 외의 텍스트(설명, 규칙, 목록, 제목 등)를 출력하면 INVALID.
+LLM_VALIDATOR_SYSTEM = r"""
+너는 이동 로봇을 위한 PLAN Validator이다.
+
+**[매우 중요] 기계적인 구조(JSON 문법, 순서, 마지막 단계 확인 등)는 이미 시스템이 검증을 마쳤다.**
+너는 오직 **"사용자의 의도와 PLAN의 내용이 일치하는지"** 의미론적(Semantic) 관점에서만 심사하라.
 
 ============================================================
-PLAN JSON, 사용자 요청, 추가 컨텍스트(HINTS)가 주어진다.
-너는 다음 규칙에 따라 VALID / INVALID 를 판단한다.
+[1] 허용 데이터
+============================================================
+(Actions) {% for a in actions %}{{ a.name }}, {% endfor %}
+(Locations) {% for l in locations %}{{ l.id }}, {% endfor %}
+
+============================================================
+[2] 검증 규칙 (오직 의미만 심사)
 ============================================================
 
-[핵심 규칙]
+**Rule 1. 파라미터 유연성 (Parameter Flexibility)**
+- Planner가 JSON을 만들 때, 문맥에 맞게 **한국어 어미를 변경**("확인하고" -> "확인해")했을 수 있다.
+- 텍스트가 원문과 100% 똑같지 않아도, **의미가 왜곡되지 않았다면 "VALID"로 판정**하라.
+- 단, 아예 없는 말을 지어내거나("커피" -> "콜라"), 엉뚱한 대상을 가리키면 INVALID이다.
 
-1. PLAN 구조 규칙  
-   PLAN은 아래 두 패턴 중 하나여야 한다:
+**Rule 2. 장소-행동 일치 (Context Match)**
+- 사용자가 "화장실"을 언급했으면 `restroom` 관련 ID로 가야 한다.
+- 사용자의 의도와 다른 엉뚱한 행동을 하는지 감시하라.
 
-   ---- (A) 단일 장소(single-location) 요청 ----
-   - navigate(target=<사용자 언급 장소>)
-   - observe_scene 또는 deliver_object
-   - navigate(target="basecamp")
-   - summarize_mission  (마지막 1회만)
+**Rule 3. 요청 가능 여부 (Availability)**
+- 사용자가 언급한 장소가 허용 `locations` 목록에 없다면 해당 PLAN은 수행 불가이다.
+- 사용자가 요구한 행동이 허용 `actions` 목록에 없다면 PLAN 역시 수행 불가이다.
+- 위 조건을 발견하면 `verdict`는 반드시 `"UNSUPPORTED"`여야 하며,
+  `reasons` 에는 `[UNSUPPORTED_LOCATION] ...` 또는 `[UNSUPPORTED_ACTION] ...` 형태로 이유를 남겨라.
 
-   ---- (B) 다중 장소(multi-location) 요청 ----
-   - (navigate(target=<사용자 언급 장소>) → observe_scene/deliver_object) 를 1회 이상 반복
-   - 마지막 navigate(target="basecamp")
-   - 마지막 summarize_mission 1회
+**[금지 사항]**
+- ❌ `summarize_mission`이 마지막에 있는지 검사하지 마라. (이미 통과됨)
+- ❌ `navigate` 순서를 검사하지 마라. (이미 통과됨)
 
-   ※ navigate, observe_scene, deliver_object는 여러 번 등장해도 정상이다.
-   ※ summarize_mission은 마지막에 단 1회만 등장한다.
-
-2. observe_scene.params.question 규칙  
-   - question 필드는 **사용자의 요청 전체 문장을 그대로 복사한 문자열**이어야 한다.
-   - 한 글자도 바뀌거나 추가되거나 삭제되면 안 된다.
-   - 임의 문자(/e13, \uXXXX 등), escape 문자가 포함되면 INVALID.
-   - 문장부호도 변경하지 않는다.
-
-3. 장소(target) 규칙  
-   - target은 반드시 HINTS 또는 RAG로 제공된 place ID 중 하나여야 한다.
-   - 사용자 요청에 등장하지 않은 장소는 PLAN에 포함될 수 없다.
-
-4. summarize_mission 규칙  
-   - PLAN 전체에서 summarize_mission은 마지막에 단 1회만 등장해야 한다.
-
-5. basecamp 규칙  
-   - summarize_mission 바로 직전은 navigate(target="basecamp") 여야 한다.
-
-6. 허용 액션 규칙  
-   - navigate, observe_scene, deliver_object, wait, summarize_mission만 허용된다.
-
-위반 사항이 있으면 INVALID + 사유를 JSON으로 출력하라.
+============================================================
+[3] 출력 형식
+============================================================
+아래 셋 중 하나만 허용한다.
+- {"verdict": "VALID", "reasons": []}
+- {"verdict": "INVALID", "reasons": ["..."]}
+- {"verdict": "UNSUPPORTED", "reasons": ["[UNSUPPORTED_LOCATION] ..."]} (또는 ACTION 태그)
 """
 
 LLM_VALIDATOR_HUMAN = r"""
 사용자 요청:
-{question}
+{{question}}
 
-추가 컨텍스트:
-{extra_context}
+{% if extra_context %}
+추가 참고 정보:
+{{extra_context}}
+{% endif %}
 
-PLAN JSON:
-{plan_json}
+PLAN JSON (검증 대상):
+{{plan_json}}
 
-반드시 아래 형식의 JSON만 출력:
-"{{\"verdict\": \"...\", \"reasons\": [...]}}"
+위 PLAN을 [핵심 검증 규칙]에 따라 엄격히 심사하여 JSON 결과를 출력하라.
 """
 
+# -------------------- Service --------------------
+
+_LLM_LOG_PATH = Path(__file__).resolve().parents[3] / "artifacts" / "plan_validator_llm.log"
+
+
+def _append_llm_log(*, question: str, plan: Any, extra_context: str | None, raw_output: str):
+    entry = {
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "question": question,
+        "plan": plan,
+        "extra_context": extra_context,
+        "raw_output": raw_output,
+    }
+    try:
+        _LLM_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+        with _LLM_LOG_PATH.open("a", encoding="utf-8") as fp:
+            fp.write(json.dumps(entry, ensure_ascii=False, default=str) + "\n")
+    except Exception:
+        # 로그 기록 오류는 검증 흐름을 막지 않음
+        pass
 
 class LLMValidatorService:
-    """Light-weight wrapper that asks the LLM to double-check a PLAN."""
+    def __init__(self):
+        actions = load_actions()
+        locations = load_locations()
 
-    def __init__(self) -> None:
         self._prompt = ChatPromptTemplate.from_messages(
             [
-                ("system", LLM_VALIDATOR_SYSTEM),
-                ("human", LLM_VALIDATOR_HUMAN),
+                SystemMessagePromptTemplate.from_template(
+                    LLM_VALIDATOR_SYSTEM,
+                    template_format="jinja2",
+                ),
+                HumanMessagePromptTemplate.from_template(
+                    LLM_VALIDATOR_HUMAN,
+                    template_format="jinja2",
+                ),
             ]
         )
+
+        self.actions = actions
+        self.locations = locations
+
+    # ---------------------
 
     def validate(
         self,
         plan: Any,
         *,
-        question: str | None,
+        question: str,
         llm: BaseChatModel,
         extra_context: str | None = None,
     ) -> PlanValidationResult:
+
         result = PlanValidationResult()
-        if llm is None:
-            return result
 
-        plan_json = json.dumps(plan, ensure_ascii=False, indent=2)
-        messages = self._prompt.format_messages(
-            question=question or "",
-            plan_json=plan_json,
-            extra_context=extra_context or "(추가 힌트 없음)",
-        )
         try:
-            response = llm.invoke(messages)
+            formatted = self._prompt.format_messages(
+                question=question,
+                extra_context=extra_context,
+                plan_json=json.dumps(plan, ensure_ascii=False),
+                actions=self.actions,
+                locations=self.locations,
+            )
+            # LLM 호출
+            response = llm.invoke(formatted)
             content = getattr(response, "content", response)
+            _append_llm_log(
+                question=question,
+                plan=plan,
+                extra_context=extra_context,
+                raw_output=content if isinstance(content, str) else str(content),
+            )
             payload = self._extract_json(content)
-        except Exception as exc:  # noqa: BLE001
-            result.add_warning(f"LLM validator 호출 실패: {exc}")
+
+        except Exception as exc:
+            result.add_warning(f"LLM Validator 호출 실패: {exc}")
             return result
 
-        verdict = (payload.get("verdict") or "").strip().upper()
+        verdict = (payload.get("verdict") or "").upper()
         reasons = payload.get("reasons") or []
-        if verdict != "VALID":
-            if not reasons:
-                result.add_error("LLM validator가 INVALID를 보고했지만 사유가 비었습니다.")
-            else:
-                for reason in reasons:
-                    result.add_error(reason)
+
+        unsupported_kind: str | None = None
+        for r in reasons:
+            if "[UNSUPPORTED_LOCATION]" in r:
+                unsupported_kind = "location"
+                break
+            if "[UNSUPPORTED_ACTION]" in r:
+                unsupported_kind = "action"
+                break
+
+        if verdict == "VALID":
+            return result
+
+        if not reasons:
+            result.add_error("LLM validator가 INVALID를 반환했지만 이유가 없습니다.")
+        else:
+            for r in reasons:
+                result.add_error(f"[LLM] {r}")
+
+        if verdict == "UNSUPPORTED":
+            result.metadata["unsupported_request"] = unsupported_kind or "unknown"
+
         return result
+
+    # ---------------------
 
     @staticmethod
     def _extract_json(text: str) -> dict:
-        try:
-            return json.loads(text)
-        except json.JSONDecodeError:
-            match = re.search(r"\{.*\}", text, re.DOTALL)
-            if not match:
-                raise ValueError("LLM validator 출력에서 JSON을 찾을 수 없습니다.") from None
-            return json.loads(match.group(0))
+        decoder = json.JSONDecoder()
+
+        def _decode(candidate: str) -> dict:
+            stripped = candidate.lstrip()
+            payload, _ = decoder.raw_decode(stripped)
+            return payload
+
+        candidates = [text]
+        cleaned = text.strip()
+        if cleaned:
+            candidates.append(cleaned)
+
+        if cleaned.startswith("```"):
+            lines = cleaned.splitlines()
+            if len(lines) >= 2:
+                candidates.append("\n".join(lines[1:-1]))
+
+        first_brace = text.find("{")
+        if first_brace != -1:
+            candidates.append(text[first_brace:])
+        first_brace_clean = cleaned.find("{")
+        if first_brace_clean != -1:
+            candidates.append(cleaned[first_brace_clean:])
+
+        for candidate in candidates:
+            try:
+                return _decode(candidate)
+            except json.JSONDecodeError:
+                continue
+
+        raise ValueError(f"LLM 출력에서 JSON을 찾을 수 없습니다. Output: {text[:50]}...")

@@ -1,9 +1,11 @@
-"""Planner LLM 호출과 PLAN 생성/검증 로직."""
+"""Planner LLM 호출과 PLAN 생성/검증 로직 (Fully Data-Driven)."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import List, Tuple
+import json
+from pathlib import Path
 
 from langchain_core.documents import Document
 from langchain_core.language_models.chat_models import BaseChatModel
@@ -35,116 +37,115 @@ class Plan(BaseModel):
     plan: List[Step] = Field(default_factory=list)
 
 
+# ---------- HINTS (메타 규칙만 남김) ----------
+
 DEFAULT_HINTS = r"""
-[장소 매핑 규칙]
-- 교수님 관련 표현(예: "교수님 방", "교수님 연구실", "연구실" 등)이 포함될 때만 target "professor_office" 사용.
-- 복도 관련 표현(예: "복도", "복도 중앙" 등)이 포함될 때만 target "corridor_center" 사용.
-- 화장실 앞 관련 표현(예: "화장실 앞")이 포함될 때만 target "restroom_front" 사용.
-- 사용자가 언급하지 않은 장소(target)는 PLAN에 절대 포함하지 않는다.
-- 여러 장소가 등장하면 사용자가 말한 **순서대로** 방문해야 한다.
+[PLAN 생성 원칙]
+1. **순서 준수:** 사용자가 여러 장소나 행동을 언급했다면, 반드시 **발화된 순서대로** PLAN을 구성해야 한다.
+2. **데이터 기반:** 오직 제공된 `Location List`와 `Action List`에 정의된 항목만 사용할 수 있다. 없는 장소나 행동은 생성하지 않는다.
 
-[행동(action) 결정 규칙]
-- 사용자가 각 장소에서 무엇을 하라고 했는지는 다음과 같은 패턴으로 결정한다:
-  * "보고 와", "~확인해", "~봐줘", "~인지 확인" → observe_scene
-  * "전달해줘", "갖다줘", "드리고 와", "~건네" → deliver_object
-  * "기다려", "~나오면", "~될 때까지 기다려" → wait
-- 명령이 없으면 임의로 추가하거나 추론하지 않는다.
-
-[question/params 규칙 (모든 action 공통 적용)]
-- 각 action의 params.question(또는 equivalent 필드)은
-  **해당 장소와 직접 연결된 '사용자 원문 구절'을 그대로 복사**해야 한다.
-- 원문에 없는 단어를 추가/삭제/변경하면 INVALID.
-- escape 문자(\uXXXX, /e13 등) 출력 금지.
-- 여러 장소가 있으면, 각 장소에 대해 원문에서 그 장소와 연결된 구절을 각각 발췌한다.
-
-[PLAN 구조 규칙]
-- 각 장소마다:
-    navigate(target=<장소>)
-    action(해당 장소의 행동)
-- 모든 장소 처리 후:
-    navigate(target="basecamp")
-    summarize_mission
+[파라미터 추출 규칙 (nl_params)]
+- Action 정의에 `nl_params`(예: question, instruction)가 있다면, 그 값은 **사용자 원문에서 해당 부분의 구절(Substring)을 그대로 복사**해야 한다.
+- 요약하거나 단어를 바꾸지 말고, 문맥상 필요한 부분을 통째로 발췌한다.
+- 예시: "강아지가 있는지 확인해" -> question="강아지가 있는지" (O)
 """
 
 
-# ---------- 프롬프트 ----------
-
 PLAN_SYSTEM_PROMPT = r"""
-너는 이동 로봇을 위한 고정식 Task Planner이다.
-너의 출력은 반드시 JSON 하나만 포함해야 한다. JSON 밖에 다른 텍스트는 절대 금지한다.
+너는 이동 로봇을 위한 Task Planner이다.
+아래 제공되는 **Action List**와 **Location List** 데이터만을 사용하여, 사용자의 요청을 실행 가능한 JSON PLAN으로 변환하라.
 
 ============================================================
-[1] 절대 규칙
+[1] Action List (사용 가능한 행동)
 ============================================================
-- JSON 외 텍스트 출력 금지.
-- JSON 최상위 키는 "plan" 하나만 존재.
-- action은 다음 4개만 사용: navigate, observe_scene, deliver_object, summarize_mission.
-- target은 반드시 HINTS 또는 RAG로 주어진 place ID 중 하나여야 하며,
-  사용자 요청에 등장한 장소만 PLAN에 포함해야 한다.
-- summarize_mission은 PLAN 마지막에 1회만 등장.
-- summarize_mission 바로 앞에는 navigate(target="basecamp")가 반드시 존재해야 한다.
+{% for a in actions -%}
+### {{ a.name }}
+- Description: {{ a.description }}
+- Required Params: {{ a.required_params }}
+{% if a.trigger_phrases %}- Triggers: {{ a.trigger_phrases | join(", ") }}{% endif %}
+{% if a.nl_params %}- NL Params: {{ a.nl_params | join(", ") }} (원문 발췌 필수){% endif %}
+
+{% endfor %}
 
 ============================================================
-[2] PLAN 기본 구조
+[2] Location List (사용 가능한 장소)
 ============================================================
-
-(단일 장소 요청일 때)
-1) navigate(target=<장소>)
-2) action(observe_scene 또는 deliver_object)
-3) navigate(target="basecamp")
-4) summarize_mission
-
-(다중 장소 요청일 때)
-각 장소마다:
-    - navigate(target=<장소>)
-    - action(observe_scene 또는 deliver_object)
-모든 장소 처리 후:
-    - navigate(target="basecamp")
-    - summarize_mission
+{% for loc in locations -%}
+- {{ loc.id }}: {{ loc.description }}
+{% endfor %}
 
 ============================================================
-[3] observe_scene.question 규칙 (중요)
+[3] PLAN 구조 생성 규칙 (절대 준수 - 위반 시 로봇 고장남)
 ============================================================
-- question 값은 "사용자 원문에서 해당 장소와 관련된 구절을 그대로 발췌" 해야 한다.
-- 새로운 문장/단어를 생성하면 안 된다.
-- 단어 추가/삭제/순서 변경 금지.
-- "\uXXXX", "/e13" 같은 escape 이상문자 출력 금지.
-- 장소마다 서로 다른 질문을 써도 된다. (각 장소 관련 substring을 사용)
+너는 **순간이동을 할 수 없는 로봇**이다.
+따라서 어떤 장소에서 Action을 수행하려면, **반드시 먼저 그 장소로 이동(navigate)해야 한다.**
 
-예)
-사용자 요청: "교수님 방과 복도 좀 보고 와줘"
-→ professor_office에서는 "교수님 방" 또는 "교수님 방 보고 와줘" 등 원문 substring
-→ corridor_center에서는 "복도" 또는 "복도 보고 와줘" 등 원문 substring
+사용자가 언급한 장소들의 순서를 따라 아래 **[이동 -> 행동] 패턴**을 엄격히 지켜라.
+
+**(패턴 정의)**
+1. **Navigate Step**: `{"action": "navigate", "params": {"target": "목적지ID"}}`
+2. **Action Step**: 그 장소에서 해야 할 Action (예: deliver, observe 등)
+
+**[금지 사항 - Negative Constraints]**
+- ❌ 절대로 `Navigate` 없이 `action`만 단독으로 출력하지 말 것.
+- ❌ `deliver_object`, `observe_scene` 등이 `Navigate`보다 먼저 나오면 안 됨.
+- ❌ 같은 장소에서 여러 행동을 하더라도, 최초 1회는 반드시 `Navigate`가 선행되어야 함.
 
 ============================================================
-[4] 출력 형식
+[4] 파라미터 채우기 규칙 (Data Consistency)
+============================================================
+- **target**: 반드시 위 [2] Location List에 있는 `id`만 사용해야 한다.
+- **NL Params (question, instruction 등)**:
+  - Action 정의에 `nl_params`가 있다면, 그 값은 **사용자 원문에서 해당 부분의 구절(Substring)을 그대로 복사**해야 한다.
+  - 요약하거나 단어를 바꾸지 말고, 문맥상 필요한 부분을 통째로 발췌한다.
+
+============================================================
+[5] 미션 종료 규칙 (Closing Sequence)
+============================================================
+사용자가 요청한 모든 [이동 -> 행동] 루프가 끝난 후,
+**절대로 멈추지 말고** 무조건 아래 두 단계를 마지막에 추가하여 복귀하라.
+
+1. navigate(target="basecamp")
+2. summarize_mission
+
+============================================================
+[6] 출력 형식 예시
 ============================================================
 {
   "plan": [
-    {
-      "action": "...",
-      "params": { ... }
-    }
+    { "action": "navigate", "params": { "target": "professor_office" } },  <-- 먼저 이동!
+    { "action": "deliver_object", "params": { "target": "professor_office" } }, <-- 행동!
+    ... (중간 반복) ...,
+    { "action": "navigate", "params": { "target": "basecamp" } }, <-- 복귀 필수!
+    { "action": "summarize_mission", "params": {} } <-- 보고 필수!
   ]
 }
 """
 
-PLAN_USER_PROMPT = """
+USER_QUESTION_PROMPT = """
 사용자의 요청:
 {{question}}
-
-추가 지시(HINTS):
-{{hints}}
-
-위 정보를 기반으로 JSON PLAN만 출력하라.
-JSON 외의 텍스트는 절대 출력하지 않는다.
 """
 
+USER_HINTS_PROMPT = """
+참고 힌트(HINTS):
+{{hints}}
+"""
+
+_SEED_DIR = Path(__file__).resolve().parents[3] / "data" / "seed"
+
+def _load_seed_items(filename: str, key: str):
+    path = _SEED_DIR / filename
+    try:
+        with path.open(encoding="utf-8") as f:
+            data = json.load(f)
+    except FileNotFoundError as exc:
+        raise FileNotFoundError(f"Seed file not found: {path}") from exc
+    return data[key]
 
 @dataclass(slots=True)
 class PlannerDependencies:
     llm: BaseChatModel
-
 
 def _build_plan_chain(llm: BaseChatModel):
     prompt = ChatPromptTemplate.from_messages(
@@ -154,23 +155,37 @@ def _build_plan_chain(llm: BaseChatModel):
                 template_format="jinja2",
             ),
             HumanMessagePromptTemplate.from_template(
-                PLAN_USER_PROMPT,
+                USER_QUESTION_PROMPT,
+                template_format="jinja2",
+            ),
+            HumanMessagePromptTemplate.from_template(
+                USER_HINTS_PROMPT,
                 template_format="jinja2",
             ),
         ]
     )
     return prompt | llm.with_structured_output(Plan)
 
-
 def generate_plan(
     question: str,
     llm: BaseChatModel,
     waypoint_docs: List[Document] | None = None,
 ) -> Tuple[dict, List[Document]]:
-    """PLANNER LLM을 호출해 PLAN JSON을 생성한다."""
-
+    actions = _load_seed_items("actions.json", "actions")
+    locations = _load_seed_items("locations.json", "locations")
     docs = waypoint_docs or []
+
     chain = _build_plan_chain(llm)
-    plan_obj = chain.invoke({"question": question, "hints": DEFAULT_HINTS})
+
+    # hints에는 이제 특정 액션 이름이 들어가지 않음 (Generic Logic)
+    plan_obj = chain.invoke(
+        {
+            "question": question,
+            "hints": DEFAULT_HINTS, 
+            "actions": actions,
+            "locations": locations,
+        }
+    )
+
     plan_dict = plan_obj.model_dump() if isinstance(plan_obj, Plan) else plan_obj
     return plan_dict, docs
