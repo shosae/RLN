@@ -17,7 +17,9 @@ from app.graph.nodes.validator_node import run_validator
 from app.services.executor_service import ExecutorService
 
 
-_VALIDATION_LOG = Path(__file__).resolve().parents[3] / "artifacts" / "plan_validation.log"
+_ARTIFACT_DIR = Path(__file__).resolve().parents[3] / "artifacts"
+_VALIDATION_LOG = _ARTIFACT_DIR / "plan_validation.log"
+_TRACE_LOG = _ARTIFACT_DIR / "orchestrator_trace.log"
 
 
 def _append_validation_log(
@@ -35,11 +37,29 @@ def _append_validation_log(
         "plan": plan,
         "errors": list(getattr(validation, "errors", []) or []),
         "warnings": list(getattr(validation, "warnings", []) or []),
-        "metadata": getattr(validation, "metadata", {}),
+        "llm_verdict": getattr(validation, "llm_verdict", None),
+        "llm_reason": getattr(validation, "llm_reason", None),
     }
     _VALIDATION_LOG.parent.mkdir(parents=True, exist_ok=True)
     with _VALIDATION_LOG.open("a", encoding="utf-8") as fp:
         fp.write(json.dumps(log_entry, ensure_ascii=False) + "\n")
+
+
+def _append_trace_entry(
+    *,
+    question: str,
+    phase: str,
+    payload: Dict[str, Any],
+) -> None:
+    entry = {
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "question": question,
+        "phase": phase,
+        "payload": payload,
+    }
+    _TRACE_LOG.parent.mkdir(parents=True, exist_ok=True)
+    with _TRACE_LOG.open("a", encoding="utf-8") as fp:
+        fp.write(json.dumps(entry, ensure_ascii=False) + "\n")
 
 
 class OrchestratorState(TypedDict, total=False):
@@ -53,7 +73,13 @@ class OrchestratorState(TypedDict, total=False):
     current_step: Dict[str, Any]
     agent_status: Literal["continue", "done"]
     plan_attempts: int
-    plan_status: Literal["pending", "ok", "retry", "failed"]
+    plan_status: Literal[
+        "pending",
+        "ok",
+        "retry",
+        "failed",
+        "unsupported",
+    ]
 
 
 def build_orchestrator_graph(llm, retriever, executor: ExecutorService):
@@ -70,6 +96,9 @@ def build_orchestrator_graph(llm, retriever, executor: ExecutorService):
         }
 
     def conversation(state: OrchestratorState) -> OrchestratorState:
+        override = state.get("conversation_override")
+        if override:
+            return {"answer": override, "conversation_override": ""}
         answer = run_conversation_node(state.get("question", ""), llm, retriever)
         return {"answer": answer}
 
@@ -77,6 +106,14 @@ def build_orchestrator_graph(llm, retriever, executor: ExecutorService):
         result = run_plan_node(state.get("question", ""), llm, [])
         plan_queue = list(result.plan.get("plan", []))
         attempts = int(state.get("plan_attempts") or 0) + 1
+        _append_trace_entry(
+            question=state.get("question", ""),
+            phase="plan",
+            payload={
+                "attempt": attempts,
+                "plan": result.plan,
+            },
+        )
         return {
             "plan": result.plan,
             "plan_queue": plan_queue,
@@ -101,10 +138,11 @@ def build_orchestrator_graph(llm, retriever, executor: ExecutorService):
             extra_context=state.get("extra_context", None), # llm rag 문서 검색 결과 
         )
         question = state.get("question", "")
-        unsupported_kind = (validation.metadata or {}).get("unsupported_request")
+        llm_verdict = getattr(validation, "llm_verdict", None)
+        llm_reason = getattr(validation, "llm_reason", "")
 
-        if unsupported_kind:
-            status = f"unsupported_{unsupported_kind}"
+        if llm_verdict == "UNSUPPORTED":
+            status = "unsupported"
         else:
             status = "ok" if validation.is_valid else None
             attempts = int(state.get("plan_attempts") or 0)
@@ -117,19 +155,27 @@ def build_orchestrator_graph(llm, retriever, executor: ExecutorService):
             validation=validation,
             status=status or "unknown",
         )
+        _append_trace_entry(
+            question=question,
+            phase="validation",
+            payload={
+                "status": status,
+                "errors": list(validation.errors),
+                "warnings": list(validation.warnings),
+                "llm_verdict": getattr(validation, "llm_verdict", None),
+                "llm_reason": getattr(validation, "llm_reason", None),
+            },
+        )
 
-        if unsupported_kind:
-            if unsupported_kind == "location":
-                answer = "저는 이 장소에 갈 수 없어요, 죄송하지만 다른 요청을 해주시겠어요?"
-            elif unsupported_kind == "action":
-                answer = "저는 이 행동을 수행할 수 없어요, 죄송하지만 다른 요청을 해주시겠어요?"
-            else:
-                answer = "요청을 수행할 수 없어 대화 모드로 전환합니다."
+        if llm_verdict == "UNSUPPORTED":
+            reason_text = (llm_reason or "").strip()
+            base = "죄송하지만 이 요청을 수행할 수 없습니다. 다른 요청을 해주시겠어요?"
+            answer = f"{base}\n\n상세: {reason_text}" if reason_text else base
             return {
                 "validation": validation,
-                "plan_status": "failed",
+                "plan_status": "unsupported",
                 "plan_queue": [],
-                "answer": answer,
+                "conversation_override": answer,
             }
 
         if status == "ok":
@@ -170,7 +216,17 @@ def build_orchestrator_graph(llm, retriever, executor: ExecutorService):
             result = {"status": "error", "message": f"Unsupported action {action}"}
         else:
             result = tool.invoke(params)
+        remaining = state.get("plan_queue") or []
         logs = (state.get("execution_logs") or []) + [{"step": step, "result": result}]
+        _append_trace_entry(
+            question=state.get("question", ""),
+            phase="execution_step",
+            payload={
+                "step": step,
+                "result": result,
+                "remaining_queue": remaining,
+            },
+        )
         return {"execution_logs": logs, "current_step": {}}
 
     graph = StateGraph(OrchestratorState)
@@ -191,7 +247,12 @@ def build_orchestrator_graph(llm, retriever, executor: ExecutorService):
     graph.add_conditional_edges(
         "validate_plan",
         lambda s: s.get("plan_status", "ok"),
-        {"ok": "executor", "retry": "plan", "failed": END},
+        {
+            "ok": "executor",
+            "retry": "plan",
+            "failed": END,
+            "unsupported": "conversation",
+        },
     )
     graph.add_conditional_edges(
         "executor",

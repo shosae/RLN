@@ -17,7 +17,8 @@ class PlanValidationResult:
     """Structural rule validation result."""
     errors: List[str] = field(default_factory=list)
     warnings: List[str] = field(default_factory=list)
-    metadata: Dict[str, Any] = field(default_factory=dict)
+    llm_verdict: str | None = None
+    llm_reason: str | None = None
 
     @property
     def is_valid(self) -> bool:
@@ -159,19 +160,21 @@ class RuleBasedValidator:
 
             # action 유효
             if action not in self.allowed_actions:
-                result.add_error(f"[step {idx}] 허용되지 않은 action: {action}")
-                continue
+                # result.add_error(f"[step {idx}] 허용되지 않은 action: {action}")
+                # continue
+                pass
 
             # target 유효
             if action == "navigate":
-                tgt = params.get("target")
-                if tgt not in self.allowed_locations:
-                    result.add_error(f"[step {idx}] 잘못된 target 장소: {tgt}")
+                # tgt = params.get("target")
+                # if tgt not in self.allowed_locations:
+                #     result.add_error(f"[step {idx}] 잘못된 target 장소: {tgt}")
+                pass
 
             # params 텍스트 규칙: substring + escape 금지
             for key, val in params.items():
                 if isinstance(val, str):
-                    is_location_ref = key == "target" and val in self.allowed_locations
+                    # is_location_ref = key == "target" and val in self.allowed_locations
                     # if not is_location_ref and query_text and val not in query_text:
                     #     result.add_error(f"[step {idx}] params.{key}='{val}' 은 사용자 요청에서 substring으로 찾을 수 없습니다.")
                     if "\\u" in val or "/e" in val:
@@ -184,7 +187,15 @@ class RuleBasedValidator:
 
         # -------- [2] PLAN 규칙 검증 --------
         for rule in self.plan_rules:
-            result.errors.extend(rule(steps))
+            # 각 rule에서 반환된 에러에 [RuleBase] prefix 추가 후 errors에 append
+            for err in rule(steps):
+                result.errors.append(f"[RuleBase] {err}")
+
+        # 모든 RuleBase 오류에 공통 prefix 부여 (중복 방지)
+        result.errors = [
+            err if err.startswith("[RuleBase]") else f"[RuleBase] {err}"
+            for err in result.errors
+        ]
 
         return result
 
