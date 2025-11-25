@@ -16,8 +16,18 @@ class PlanNodeResult:
     context_docs: List[Document]
 
 
-def run_plan_node(question: str, llm, waypoint_docs: List[Document] | None = None) -> PlanNodeResult:
+def run_plan_node(
+    question: str,
+    llm,
+    waypoint_docs: List[Document] | None = None,
+    retry_feedback: str | None = None,
+) -> PlanNodeResult:
     """Planner node가 호출할 진입점."""
 
-    plan_dict, docs = generate_plan(question, llm, waypoint_docs)
+    if retry_feedback:
+        augmented_question = f"{question}\n\n[검증 피드백]\n{retry_feedback}"
+    else:
+        augmented_question = question
+
+    plan_dict, docs = generate_plan(augmented_question, llm, waypoint_docs)
     return PlanNodeResult(plan=plan_dict, context_docs=docs)

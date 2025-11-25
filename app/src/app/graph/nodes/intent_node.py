@@ -2,23 +2,21 @@
 
 from __future__ import annotations
 
-from typing import Literal
+from langchain_core.language_models.chat_models import BaseChatModel
+
+from app.services.classify_intent_service import (
+    IntentClassifierService,
+    IntentPrediction,
+)
+
+_CLASSIFIER = IntentClassifierService()
 
 
-PLAN_KEYWORDS = ("하고와", "보고와")
+def classify_intent(
+    question: str,
+    *,
+    llm: BaseChatModel | None = None,
+) -> IntentPrediction:
+    """LLM 기반 intent 분류."""
 
-
-def normalize_question(question: str) -> str:
-    """Utility to remove spaces for easier substring matching."""
-
-    return "".join(question.split())
-
-
-def classify_intent(question: str) -> Literal["conversation", "plan"]:
-    """Return 'plan' when the utterance implies plan/execution."""
-
-    normalized = normalize_question(question or "")
-    for keyword in PLAN_KEYWORDS:
-        if keyword in normalized:
-            return "plan"
-    return "conversation"
+    return _CLASSIFIER.classify(question, llm=llm)

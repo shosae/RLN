@@ -20,6 +20,7 @@ dependencies = [
     "pydantic>=2.0",
     "python-dotenv",
     "sentence-transformers",
+    "grpcio>=1.62.0",
 ]
 
 [project.optional-dependencies]

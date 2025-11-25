@@ -12,6 +12,7 @@ from app.graph.graph_builder import build_orchestrator_graph
 from app.services.llm_service import LLMConfig, build_llm
 from app.services.executor_service import ExecutorService
 from app.services.rag_service import RAGService, VectorStoreConfig
+from app.services.robot_grpc_client import RobotGrpcClient
 
 class Context(TypedDict, total=False):
     mode: str
@@ -46,7 +47,8 @@ def _build_graph():
         )
     )
     retriever = rag_service.get_conversation_retriever(top_k=int(os.getenv("TOP_K", "4")))
-    executor = ExecutorService()
+    robot_client = RobotGrpcClient(settings.robot_grpc_target)
+    executor = ExecutorService(robot_client=robot_client)
 
     _graph = build_orchestrator_graph(llm, retriever, executor)
     return _graph

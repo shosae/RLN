@@ -18,6 +18,7 @@ class AppSettings:
     temperature: float
     chunk_size: int
     chunk_overlap: int
+    robot_grpc_target: str
 
 
 def load_settings() -> AppSettings:
@@ -28,8 +29,10 @@ def load_settings() -> AppSettings:
         embedding_model=os.getenv("EMBEDDINGS_MODEL", "sentence-transformers/all-MiniLM-L6-v2"),
         waypoint_docs_dir=Path(os.getenv("WAYPOINT_DIR", root / "data" / "seed")).resolve(),
         llm_provider=os.getenv("LLM_PROVIDER", "langgraph"),
-        llm_model=os.getenv("LLM_MODEL", "llama3.1-8b-local"),
+        # llm_model=os.getenv("LLM_MODEL", "llama3.1-8b-local"),
+        llm_model=os.getenv("LLM_MODEL", "llama3-bllossom-local"),
         temperature=float(os.getenv("LLM_TEMPERATURE", "0")),
         chunk_size=int(os.getenv("CHUNK_SIZE", "700")),
         chunk_overlap=int(os.getenv("CHUNK_OVERLAP", "150")),
+        robot_grpc_target=os.getenv("ROBOT_GRPC_TARGET", "100.76.44.116:50051"),
     )

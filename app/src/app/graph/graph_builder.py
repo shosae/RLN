@@ -15,6 +15,7 @@ from app.graph.nodes.conversation_node import run_conversation_node
 from app.graph.nodes.intent_node import classify_intent as classify
 from app.graph.nodes.validator_node import run_validator
 from app.services.executor_service import ExecutorService
+from app.services.mission_summary_service import MissionSummaryService
 
 
 _ARTIFACT_DIR = Path(__file__).resolve().parents[3] / "artifacts"
@@ -62,9 +63,71 @@ def _append_trace_entry(
         fp.write(json.dumps(entry, ensure_ascii=False) + "\n")
 
 
+def _format_retry_feedback(validation: Any) -> str:
+    errors = list(getattr(validation, "errors", []) or [])
+    warnings = list(getattr(validation, "warnings", []) or [])
+    if not errors and not warnings:
+        return ""
+    lines = ["이전 PLAN 검증에서 발견된 문제:"]
+    if errors:
+        lines.append("오류:")
+        lines.extend(f"- {err}" for err in errors)
+    if warnings:
+        lines.append("경고:")
+        lines.extend(f"- {warn}" for warn in warnings)
+    return "\n".join(lines)
+
+
+def _format_failure_context(
+    *,
+    question: str,
+    logs: List[Dict[str, Any]],
+    error_message: str | None,
+    failed_step: Dict[str, Any] | None,
+) -> str:
+    data = {
+        "user_request": question,
+        "failed_step": {},
+        "error_message": (error_message or "").strip(),
+        "log_summary": [],
+    }
+
+    if failed_step:
+        action = failed_step.get("action", "unknown")
+        params = failed_step.get("params", {}) or {}
+        target = params.get("target") or params.get("receiver")
+        data["failed_step"] = {
+            "action": action,
+            "target": target,
+        }
+
+    if logs:
+        for entry in logs[:5]:
+            if not isinstance(entry, dict):
+                continue
+            step = entry.get("step") or {}
+            result = entry.get("result") or {}
+            action = step.get("action", "unknown")
+            params = step.get("params", {}) or {}
+            target = params.get("target") or params.get("receiver")
+            status = result.get("status", "")
+            data["log_summary"].append(
+                {
+                    "action": action,
+                    "target": target,
+                    "status": status,
+                }
+            )
+
+    return json.dumps(data, ensure_ascii=False)
+
+
 class OrchestratorState(TypedDict, total=False):
     question: str
     mode: Literal["conversation", "plan"]
+    conversation_mode: Literal["normal", "unsupported"]
+    conversation_reason: str
+    conversation_route: str
     answer: str
     plan: Dict[str, Any]
     validation: Any
@@ -80,30 +143,56 @@ class OrchestratorState(TypedDict, total=False):
         "failed",
         "unsupported",
     ]
+    plan_feedback: str
+    mission_status: Literal["pending", "failed", "completed"]
+    failure_context: str
 
 
-def build_orchestrator_graph(llm, retriever, executor: ExecutorService):
+def build_orchestrator_graph(llm,retriever,executor: ExecutorService):
     """간단한 계획/대화 그래프를 구성한다."""
 
     action_tools = build_action_tools(executor)
+    summary_service = MissionSummaryService()
 
     def classify_intent(state: OrchestratorState) -> OrchestratorState:
         question = state.get("question", "")
-        mode = classify(question)
+        prediction = classify(question, llm=llm)
         return {
-            "mode": mode,
+            "mode": prediction.intent,
             "plan_attempts": 0,
+            "conversation_mode": prediction.conversation_mode,
+            "conversation_reason": prediction.reason or "",
+            "plan_feedback": "",
+            "execution_logs": [],
+            "mission_status": "pending",
+            "failure_context": "",
         }
 
     def conversation(state: OrchestratorState) -> OrchestratorState:
         override = state.get("conversation_override")
         if override:
             return {"answer": override, "conversation_override": ""}
-        answer = run_conversation_node(state.get("question", ""), llm, retriever)
+        conv_mode = state.get("conversation_mode", "normal")
+        if conv_mode == "unsupported":
+            base = "아직은 이런 요청을 도와드리기 어려워요. 다른 도움을 드릴 수 있을까요?"
+            return {"answer": base, "conversation_reason": ""}
+        extra_context = state.get("failure_context") or None
+        answer = run_conversation_node(
+            state.get("question", ""),
+            llm,
+            retriever,
+            extra_context=extra_context,
+        )
         return {"answer": answer}
 
     def plan_and_execute(state: OrchestratorState) -> OrchestratorState:
-        result = run_plan_node(state.get("question", ""), llm, [])
+        feedback = (state.get("plan_feedback") or "").strip()
+        result = run_plan_node(
+            state.get("question", ""),
+            llm,
+            [],
+            retry_feedback=feedback if feedback else None,
+        )
         plan_queue = list(result.plan.get("plan", []))
         attempts = int(state.get("plan_attempts") or 0) + 1
         _append_trace_entry(
@@ -119,6 +208,7 @@ def build_orchestrator_graph(llm, retriever, executor: ExecutorService):
             "plan_queue": plan_queue,
             "plan_attempts": attempts,
             "plan_status": "pending",
+            "plan_feedback": "",
         }
 
     MAX_PLAN_RETRIES = 3
@@ -130,6 +220,7 @@ def build_orchestrator_graph(llm, retriever, executor: ExecutorService):
                 "plan_status": "failed",
                 "validation": None,
                 "answer": "PLAN 생성 결과가 비어 있어 실행을 종료합니다.",
+                "plan_feedback": "",
             }
         validation = run_validator(
             plan_obj,
@@ -176,16 +267,19 @@ def build_orchestrator_graph(llm, retriever, executor: ExecutorService):
                 "plan_status": "unsupported",
                 "plan_queue": [],
                 "conversation_override": answer,
+                "plan_feedback": "",
             }
 
         if status == "ok":
-            return {"validation": validation, "plan_status": "ok"}
+            return {"validation": validation, "plan_status": "ok", "plan_feedback": ""}
 
         if status == "retry":
+            feedback = _format_retry_feedback(validation)
             return {
                 "validation": validation,
                 "plan_status": "retry",
                 "plan_queue": [],
+                "plan_feedback": feedback,
             }
 
         error_text = "; ".join(validation.errors)
@@ -193,6 +287,7 @@ def build_orchestrator_graph(llm, retriever, executor: ExecutorService):
             "validation": validation,
             "plan_status": "failed",
             "answer": f"PLAN 검증 실패로 중단합니다: {error_text}",
+            "plan_feedback": "",
         }
 
     def executor(state: OrchestratorState) -> OrchestratorState:
@@ -212,6 +307,17 @@ def build_orchestrator_graph(llm, retriever, executor: ExecutorService):
         action = step.get("action")
         params = step.get("params") or {}
         tool = action_tools.get(action)
+        if action == "summarize_mission":
+            summary_text = summary_service.build_summary(
+                question=state.get("question", ""),
+                plan=state.get("plan"),
+                execution_logs=state.get("execution_logs") or [],
+                llm=llm,
+            )
+            params = dict(params)
+            params["summary"] = summary_text
+            tool = action_tools.get(action)
+
         if tool is None:
             result = {"status": "error", "message": f"Unsupported action {action}"}
         else:
@@ -227,6 +333,22 @@ def build_orchestrator_graph(llm, retriever, executor: ExecutorService):
                 "remaining_queue": remaining,
             },
         )
+        status = (result.get("status") or "").lower()
+        if status and status not in {"success", "reported"}:
+            failure_text = _format_failure_context(
+                question=state.get("question", ""),
+                logs=logs,
+                error_message=result.get("message"),
+                failed_step=step,
+            )
+            return {
+                "execution_logs": logs,
+                "current_step": {},
+                "plan_queue": [],
+                "agent_status": "done",
+                "mission_status": "failed",
+                "failure_context": failure_text,
+            }
         return {"execution_logs": logs, "current_step": {}}
 
     graph = StateGraph(OrchestratorState)
@@ -256,8 +378,12 @@ def build_orchestrator_graph(llm, retriever, executor: ExecutorService):
     )
     graph.add_conditional_edges(
         "executor",
-        lambda s: s.get("agent_status", "done"),
-        {"continue": "execute_step", "done": END},
+        lambda s: (
+            "failure"
+            if s.get("mission_status") == "failed"
+            else s.get("agent_status", "done")
+        ),
+        {"continue": "execute_step", "done": END, "failure": "conversation"},
     )
     graph.add_edge("execute_step", "executor")
     return graph.compile()

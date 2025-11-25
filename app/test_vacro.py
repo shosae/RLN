@@ -16,7 +16,7 @@ def main():
     processor = AutoProcessor.from_pretrained(model_name)
 
     # 테스트할 이미지 경로 (원하는 이미지로 교체)
-    image_path = "a.jpeg"
+    image_path = "d.jpeg"
     image = Image.open(image_path).convert("RGB")
 
     # 간단한 한국어 프롬프트 (상황 설명)
@@ -25,7 +25,7 @@ def main():
             "role": "user",
             "content": [
                 {"type": "image", "image": image},
-                {"type": "text", "text": "복도에 사람이 몇 명 있는지"},
+                {"type": "text", "text": "복도에 사람이 몇 명 있는지 50자 내로 작성해줘."},
             ],
         },
     ]

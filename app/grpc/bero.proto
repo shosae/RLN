@@ -1,0 +1,29 @@
+syntax = "proto3";
+
+package bero;
+
+// Robot 상위 제어 인터페이스
+service RobotController {
+  rpc Navigate(NavigateRequest) returns (NavigateResponse);
+  rpc DescribeScene(SceneRequest) returns (SceneResponse); // 상황 설명
+}
+
+// ===== Navigation =====
+message NavigateRequest {
+  string waypoint = 1; // 이동할 waypoint 이름
+}
+
+message NavigateResponse {
+  bool success = 1;
+  string message = 2;
+}
+
+// ===== Situation Awareness (VLM 기반 상황 설명) =====
+message SceneRequest {
+  string prompt = 1; // "복도에 사람이 있는지 알려줘"
+}
+
+message SceneResponse {
+  bool success = 1;
+  string description = 2; // "복도에 두 명의 사람이 있습니다."
+}
