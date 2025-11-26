@@ -12,6 +12,7 @@ def run_conversation_node(
     llm,
     retriever,
     extra_context: str | None = None,
+    history: str | None = None,
 ) -> str:
     """대화 노드 진입점."""
 
@@ -20,4 +21,5 @@ def run_conversation_node(
         llm=llm,
         retriever=retriever,
         extra_context=extra_context,
+        history=history,
     )

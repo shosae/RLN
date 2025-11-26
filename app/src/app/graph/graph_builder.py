@@ -5,9 +5,10 @@ from __future__ import annotations
 import json
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Dict, Any, List, Literal, TypedDict
+from typing import Annotated, Dict, Any, List, Literal, TypedDict
 
 from langgraph.graph import StateGraph, END
+from langgraph.graph.message import add_messages
 
 from app.graph.nodes.plan_node import run_plan_node
 from app.graph.nodes.execute_node import build_action_tools
@@ -122,6 +123,33 @@ def _format_failure_context(
     return json.dumps(data, ensure_ascii=False)
 
 
+def _format_conversation_history(messages: List[Any] | None) -> str:
+    if not messages:
+        return "대화 기록 없음."
+    lines: List[str] = []
+    for msg in messages[-10:]:
+        role = getattr(msg, "type", None) or getattr(msg, "role", None)
+        content = getattr(msg, "content", None)
+        if isinstance(msg, tuple):
+            role, content = msg
+        if content is None:
+            continue
+        lines.append(f"{role or 'assistant'}: {content}")
+    return "\n".join(lines) if lines else "대화 기록 없음."
+
+
+def _format_plan_history(plan_history: List[Dict[str, Any]] | None) -> str:
+    if not plan_history:
+        return ""
+    lines = ["이전 PLAN 기록:"]
+    for entry in plan_history[-3:]:
+        question = entry.get("question", "")
+        plan = entry.get("plan", {})
+        lines.append(f"- 요청: {question}")
+        lines.append(json.dumps(plan, ensure_ascii=False))
+    return "\n".join(lines)
+
+
 class OrchestratorState(TypedDict, total=False):
     question: str
     mode: Literal["conversation", "plan"]
@@ -146,6 +174,8 @@ class OrchestratorState(TypedDict, total=False):
     plan_feedback: str
     mission_status: Literal["pending", "failed", "completed"]
     failure_context: str
+    messages: Annotated[list, add_messages]
+    plan_history: List[Dict[str, Any]]
 
 
 def build_orchestrator_graph(llm,retriever,executor: ExecutorService):
@@ -157,6 +187,9 @@ def build_orchestrator_graph(llm,retriever,executor: ExecutorService):
     def classify_intent(state: OrchestratorState) -> OrchestratorState:
         question = state.get("question", "")
         prediction = classify(question, llm=llm)
+        messages = state.get("messages") or []
+        if question:
+            messages = add_messages(messages, ("user", question))
         return {
             "mode": prediction.intent,
             "plan_attempts": 0,
@@ -166,6 +199,8 @@ def build_orchestrator_graph(llm,retriever,executor: ExecutorService):
             "execution_logs": [],
             "mission_status": "pending",
             "failure_context": "",
+            "messages": messages,
+            "plan_history": state.get("plan_history") or [],
         }
 
     def conversation(state: OrchestratorState) -> OrchestratorState:
@@ -176,14 +211,25 @@ def build_orchestrator_graph(llm,retriever,executor: ExecutorService):
         if conv_mode == "unsupported":
             base = "아직은 이런 요청을 도와드리기 어려워요. 다른 도움을 드릴 수 있을까요?"
             return {"answer": base, "conversation_reason": ""}
-        extra_context = state.get("failure_context") or None
+        messages = state.get("messages") or []
+        history_text = _format_conversation_history(messages)
+        extra_blocks: List[str] = []
+        failure_ctx = state.get("failure_context")
+        if failure_ctx:
+            extra_blocks.append(failure_ctx)
+        plan_ctx = _format_plan_history(state.get("plan_history"))
+        if plan_ctx:
+            extra_blocks.append(plan_ctx)
+        extra_context = "\n\n".join(extra_blocks) if extra_blocks else None
         answer = run_conversation_node(
             state.get("question", ""),
             llm,
             retriever,
             extra_context=extra_context,
+            history=history_text,
         )
-        return {"answer": answer}
+        updated_messages = add_messages(messages, ("assistant", answer))
+        return {"answer": answer, "messages": updated_messages}
 
     def plan_and_execute(state: OrchestratorState) -> OrchestratorState:
         feedback = (state.get("plan_feedback") or "").strip()
@@ -194,6 +240,13 @@ def build_orchestrator_graph(llm,retriever,executor: ExecutorService):
             retry_feedback=feedback if feedback else None,
         )
         plan_queue = list(result.plan.get("plan", []))
+        plan_history = list(state.get("plan_history") or [])
+        plan_history.append(
+            {
+                "question": state.get("question", ""),
+                "plan": result.plan,
+            }
+        )
         attempts = int(state.get("plan_attempts") or 0) + 1
         _append_trace_entry(
             question=state.get("question", ""),
@@ -209,6 +262,7 @@ def build_orchestrator_graph(llm,retriever,executor: ExecutorService):
             "plan_attempts": attempts,
             "plan_status": "pending",
             "plan_feedback": "",
+            "plan_history": plan_history,
         }
 
     MAX_PLAN_RETRIES = 3

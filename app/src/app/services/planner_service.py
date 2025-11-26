@@ -57,7 +57,7 @@ DEFAULT_HINTS = r"""
 3. **이동 우선(Implicit Navigation):** "복도 확인해"처럼 행동의 대상이 **특정 장소**라면, 반드시 그 장소로 **먼저 이동(navigate)한 후** 행동해야 한다. (바로 action 금지)
 
 [파라미터 추출 규칙 (nl_params)]
-- Action 정의에 `nl_params`(예: question, instruction)가 있다면, 그 값은 **사용자 원문에서 해당 부분의 구절(Substring)을 그대로 복사**해야 한다.
+- Action 정의에 `nl_params`(예: question, instruction, target)가 있다면, 그 값은 **사용자 원문에서 해당 부분의 구절(Substring)을 그대로 복사**해야 한다.
 - 요약하거나 단어를 바꾸지 말고, 문맥상 필요한 부분을 통째로 발췌한다.
 - 예시: "(목표)가 있는지 확인해" -> question="(목표)가 있는지" (O)
 """
@@ -122,9 +122,10 @@ PLAN_SYSTEM_PROMPT = r"""
 (3) 암묵적 이동 (Implicit Navigation)
 - 사용자 발화에 "가", "이동해" 등의 표현이 없어도,
   특정 장소에서 수행해야 의미가 통하는 행동이면 먼저 그 장소로 navigate 해야 한다.
-  - 예: "복도에 사람 있는지 확인해"
+  - 예: "복도에 사람 있는지 확인하고 ~.."
     1) { "action": "navigate", "params": { "target": "corridor_center" } }
     2) { "action": "observe_scene", "params": { ... } }
+    3) {~..}
 
 (4) 금지 사항
 - ❌ navigate 없이 deliver/observe 등 action만 단독으로 두지 말 것.
@@ -153,6 +154,13 @@ PLAN_SYSTEM_PROMPT = r"""
 1) { "action": "navigate", "params": { "target": "basecamp" } }
 2) { "action": "summarize_mission", "params": {} }
 
+!!!! ** 매우 중요** !!!!
+또한 사용자의 요청이 "와", "돌아와", "하고 와", "갔다와", "해주고 와" 등
+복귀를 암시하는 표현으로 끝나는 경우,
+해당 표현이 있든 없든 무조건 basecamp로 복귀 후 summarize_mission을 실행해야 한다.
+**문장 후반부에서 복귀를 의미하는 표현이 있으면 반드시
+{navigate basecamp → summarize_mission}를 마지막에 넣어야 한다.**
+
 ============================================================
 [6] 예시
 ============================================================
@@ -162,7 +170,7 @@ PLAN_SYSTEM_PROMPT = r"""
 {
   "plan": [
     { "action": "navigate", "params": { "target": "professor_office" } },
-    { "action": "deliver_object", "params": { "target": "professor_office" } },
+    { "action": "deliver_object", "params": { "target": "서류" } },
 
     { "action": "navigate", "params": { "target": "corridor_center" } },
     { "action": "observe_scene", "params": { "question": "불 났는지 확인해" } },
