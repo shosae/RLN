@@ -30,7 +30,7 @@
     },
     {
       "name": "deliver_object",
-      "description": "지정된 위치에서 기다리며 사람이 물건을 가져갈때까지 기다림.",
+      "description": "navigate 후, 가만히 기다리며 사람이 물건을 가져갈때까지 기다림.",
       "required_params": ["item"],
       "nl_params": ["item"],
       "trigger_phrases": [
@@ -86,6 +86,7 @@
         "알려달라해",
         "한번 물어봐봐"
       ]
+
     }
   ]
 }

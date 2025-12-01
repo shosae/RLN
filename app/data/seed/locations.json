@@ -9,6 +9,14 @@
       "description": "복도 중앙 또는 복도 중심 영역."
     },
     {
+      "id": "corridor_left",
+      "description": "복도 왼쪽 또는 복도 좌측, 좌측 복도"
+    },
+    {
+      "id": "corridor_right",
+      "description": "복도 우측 또는 복도 오른쪽, 우측 복도"
+    },
+    {
       "id": "restroom_front",
       "description": "화장실 입구 앞 또는 화장실 앞 공간."
     },

@@ -84,6 +84,13 @@ DEFAULT_HINTS = r"""
      추가 action(deliver_object, observe_scene 등)을 새로 만들지 않는다.
    - 복귀와 요약은 전역 규칙에 따라
      `navigate(target="basecamp")` 와 `summarize_mission` 으로 마무리한다.
+6. **deliver_object 의미와 제약:**
+   - `deliver_object`는 로봇이 **이미 사람이 실어준 물건을 들고** 지정된 위치로 이동한 뒤,
+     그 위치에서 사람이 물건을 가져갈 때까지 잠시 대기하고 전달하는 행동이다.
+   - 물건을 찾아다니거나, 집어서 다시 다른 곳으로 가져오는 행동이 아니다.
+   - 항상 **해당 위치로의 navigate 이후**에 나와야 하며,
+     그 navigate와 **같은 장소 컨텍스트**에서 바로 이어지는 step으로 둔다.
+   - `navigate` 없이 단독으로 사용하거나, 전혀 다른 장소로 바로 이어지는 `deliver_object`를 만들지 말아야 한다.
 
 [파라미터 추출 규칙 (nl_params)]
 - Action 정의에 `nl_params`(예: question, instruction, target)가 있다면, 그 값은 **사용자 원문에서 해당 부분의 구절(Substring)을 그대로 복사**해야 한다.
@@ -153,6 +160,16 @@ PLAN_SYSTEM_PROMPT = r"""
 {% if a.nl_params %}- NL Params: {{ a.nl_params | join(", ") }} (원문 발췌 필수){% endif %}
 {% endfor %}
 
+추가 설명 – deliver_object:
+- `deliver_object`는 로봇이 **이미 사람이 적재해 준 물건**을 들고,
+  지정된 위치로 이동한 뒤 **그 자리에서 사람이 가져갈 때까지 잠시 대기하며 전달하는 행동**이다.
+- 물건을 찾아서 집어 들거나, 다른 곳으로 다시 가져오는 픽업/회수 미션이 아니다.
+- 항상 해당 위치에 대한 `navigate` 이후에 바로 이어지는 step으로 사용해야 한다.
+
+예:
+  1) { "action": "navigate", "params": { "target": "professor_office" } }
+  2) { "action": "deliver_object", "params": { ... } }   ← 같은 위치에서 바로 배달
+
 ============================================================
 [2] Location List (사용 가능한 장소)
 ============================================================
@@ -175,6 +192,11 @@ PLAN_SYSTEM_PROMPT = r"""
 - 하나의 장소에서 여러 행동을 지시했다면,
   - navigate 한 번 뒤에 **같은 target을 가지는 action step들을 연속으로 배치**한다.
 
+- 특히 `deliver_object`는 항상
+  - 직전에 해당 위치로의 `navigate`가 나와 있고,
+  - 그 `navigate`와 같은 장소 컨텍스트에서 바로 이어져야 한다.
+  - 다른 장소로 `navigate`한 뒤에 곧바로 `deliver_object`를 두는 것은 허용되지 않는다.
+
 (3) 암묵적 이동 (Implicit Navigation)
 - 사용자 발화에 "가", "이동해" 등의 표현이 없어도,
   특정 장소에서 수행해야 의미가 통하는 행동이면 먼저 그 장소로 navigate 해야 한다.
@@ -184,9 +206,10 @@ PLAN_SYSTEM_PROMPT = r"""
     3) {~..}
 
 (4) 금지 사항
-- ❌ navigate 없이 deliver/observe 등 action만 단독으로 두지 말 것.
-- ❌ basecamp가 아닌 다른 장소에서 summarize_mission을 호출하지 말 것.
+- ❌ `navigate` 없이 `deliver_object`, `observe_scene` 등 action만 단독으로 두지 말 것.
+- ❌ basecamp가 아닌 다른 장소에서 `summarize_mission`을 호출하지 말 것.
 - ❌ Action List / Location List에 없는 이름을 새로 만들지 말 것.
+- ❌ `deliver_object`를, 직전에 해당 위치로 이동하지 않은 상태에서 다른 장소로 연결되는 step 사이에 끼워 넣지 말 것.
 
 (5) 순수 이동 미션
 - 사용자가 특정 위치만 언급하고
@@ -200,7 +223,7 @@ PLAN_SYSTEM_PROMPT = r"""
   2) 마지막에는 전역 규칙에 따라
      { "action": "navigate", "params": { "target": "basecamp" } },
      { "action": "summarize_mission", "params": {} } 를 붙인다.
-- 이때 deliver_object, observe_scene 등의 추가 action을
+- 이때 `deliver_object`, `observe_scene` 등의 추가 action을
   사용자가 명시적으로 요구하지 않았다면 **절대 생성하지 않는다.**
 
 ============================================================
@@ -247,12 +270,12 @@ PLAN_SYSTEM_PROMPT = r"""
   ]
 }
 
-사용자 요청: "무대에서 뭘 하고있는지 보고와"
+사용자 요청: "화장실 앞에서 사람한테 커피만 전해주고 와"
 
 {
   "plan": [
-    { "action": "navigate", "params": { "target": "stage_front" } },
-    { "action": "observe_scene", "params": { "question": "뭘 하고있는지 보고와" } },
+    { "action": "navigate", "params": { "target": "restroom_front" } },
+    { "action": "deliver_object", "params": { "target": "커피" } },
 
     { "action": "navigate", "params": { "target": "basecamp" } },
     { "action": "summarize_mission", "params": {} }
